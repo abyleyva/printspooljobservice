@@ -1,0 +1,6 @@
+@PrintSpoolJobService_HostAddress = http://localhost:5226
+
+GET {{PrintSpoolJobService_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
