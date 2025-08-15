@@ -2,6 +2,7 @@
 using Spire.Pdf;
 using Spire.Pdf.Print;
 using System.Drawing.Printing;
+using System.Net;
 
 
 namespace PrintSpoolJobService.Controllers
@@ -16,7 +17,7 @@ namespace PrintSpoolJobService.Controllers
         {
             _logger = logger;
         }
-        [HttpGet("GetAllPrinters")]
+        [HttpGet("get-printers")]
         public IActionResult GetPrinters()
         {
             try
@@ -211,6 +212,33 @@ namespace PrintSpoolJobService.Controllers
             {
                 _logger?.LogError(ex, "Error printing EZPL Document");
                 return StatusCode(500, "Internal server error - Error print EZPL Document");
+            }
+        }
+
+        [HttpGet("get-local-ipaddress")]
+        public IActionResult GetLocalIPAddress()
+        {
+            try
+            {
+                var host = Dns.GetHostEntry(Dns.GetHostName());
+                var ipAddressV4 = host.AddressList.FirstOrDefault(ip => ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+                var ipAddressV6 = host.AddressList.FirstOrDefault(ipv6 => ipv6.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6);
+
+                if (ipAddressV4 == null)
+                {
+                    return NotFound("No local IP address found");
+                }
+                return Ok(new
+                {
+                    hostname = host.HostName,
+                    localipV4 = ipAddressV4.ToString(),
+                    localipV6 = ipAddressV6?.ToString() ?? "No IPv6 address found"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error fetching local IP address");
+                return StatusCode(500, "Internal server error - Error fetching local IP address");
             }
         }
 
