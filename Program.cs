@@ -19,14 +19,14 @@ builder.Services.AddSwaggerGen();
 builder.WebHost.ConfigureKestrel(options => 
 {
     options.ListenAnyIP(5000);
-    //options.ListenAnyIP(5226);
+    options.ListenAnyIP(5226);
 }
 );
 
 var app = builder.Build();
 
 // Set the URLs for the application
-app.Urls.Add("http://localhost:5000");
+//app.Urls.Add("http://localhost:5000");
 
 // Apply CORS policy
 app.UseCors("AllowAllOrigins");

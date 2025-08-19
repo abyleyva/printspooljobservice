@@ -8,7 +8,7 @@ using System.Net;
 namespace PrintSpoolJobService.Controllers
 {
     [ApiController]
-    [Route("[controller]")]
+    [Route("api/[controller]")]
     public class PrinterController : ControllerBase
     {
         private readonly ILogger<PrinterController>? _logger;
@@ -241,6 +241,33 @@ namespace PrintSpoolJobService.Controllers
                 return StatusCode(500, "Internal server error - Error fetching local IP address");
             }
         }
+        public static void PrintTicketPOS()
+        {
+            string printerName = "YourPrinterName"; // Replace with your printer name
+            string textToPrint = "Hello, this is a test print from PrintSpoolJobService!";
+            try
+            {
+                // Create a new PrintDocument
+                PrintDocument printDocument = new PrintDocument();
+                printDocument.PrinterSettings.PrinterName = printerName;
+                // Check if the printer is valid
+                if (!printDocument.PrinterSettings.IsValid)
+                {
+                    throw new Exception($"Printer '{printerName}' is not valid.");
+                }
+                // Set the PrintPage event handler
+                printDocument.PrintPage += (sender, e) =>
+                {
+                    //e.Graphics.DrawString(textToPrint, new Font("Arial", 12), Brushes.Black, 10, 10);
+                };
+                // Print the document
+                printDocument.Print();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error printing ticket: {ex.Message}");
+            }
 
+        }
     }
 }
