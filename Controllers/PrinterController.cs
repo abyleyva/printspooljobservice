@@ -1,29 +1,20 @@
-﻿using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Spire.Pdf;
 using Spire.Pdf.Print;
 using System.Drawing.Printing;
 using System.Net;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace PrintSpoolJobService.Controllers
 {
     [ApiController]
-    [Authorize] // Requiere autenticación por defecto
-    [Route("api/[controller]")]
-    [Produces("application/json")]
+    [Route("api/[controller]")]    
     public class PrinterController : ControllerBase
     {
         private readonly ILogger<PrinterController>? _logger;
-
         public PrinterController(ILogger<PrinterController> logger)
         {
             _logger = logger;
         }
-
-        [AllowAnonymous] // <-- público
         [HttpGet("get-printers")]
         public IActionResult GetPrinters()
         {
@@ -50,7 +41,6 @@ namespace PrintSpoolJobService.Controllers
             }
         }
 
-        [AllowAnonymous] // <-- público
         [HttpGet("get-local-ipaddress")]
         public IActionResult GetLocalIPAddress([FromQuery] string? select = "all")
         {
@@ -195,7 +185,6 @@ namespace PrintSpoolJobService.Controllers
         }
 
         // Imprimir PDFs
-        [AllowAnonymous] // <-- público
         [HttpPost("print-pdf")]
         [RequestSizeLimit(10_000_000)] // 10 MB
         [Consumes("multipart/form-data")]
@@ -217,7 +206,6 @@ namespace PrintSpoolJobService.Controllers
         }
 
         // Imprimir EZPL/ZPL como RAW a impresoras tipo Zebra
-        [AllowAnonymous] // <-- público
         [HttpPost("print-label")]
         [RequestSizeLimit(2_000_000)] // 2 MB
         [Consumes("multipart/form-data")]
@@ -272,57 +260,14 @@ namespace PrintSpoolJobService.Controllers
                 return StatusCode(500, "Internal server error - Error print EZPL Document");
             }
         }
-        // Imprimir ticket (Json Format) - mantiene la ruta original pero usa la lógica común
-        [AllowAnonymous] // <-- público
-        [HttpPost("print-ticket-json")]
-        [RequestSizeLimit(10_000_000)] // 10 MB
-        [Consumes("multipart/form-data")]
-        public async Task<IActionResult> PrintPosTicket(IFormFile fileDocument, [FromForm] string printerName, CancellationToken ct)
-        {
-            if (fileDocument == null || fileDocument.Length == 0)
-                return BadRequest("El documento JSON no puede ser nulo o vacío");
-
-            if (!IsJsonContentType(fileDocument.ContentType))
-                return BadRequest("Content-Type debe ser 'application/json' o 'application/octet-stream'");
-
-            if (!IsPrinterNameSafe(printerName))
-                return BadRequest("El nombre de impresora contiene caracteres no válidos");
-
-            if (!PrinterExists(printerName))
-                return NotFound($"Impresora '{printerName}' no encontrada");
-
-            try
-            {
-                using var reader = new StreamReader(fileDocument.OpenReadStream(), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-                var json = await reader.ReadToEndAsync(ct);
-
-                //await PrintTicketFromJsonAsync(json, printerName.Trim(), ct);
-                return Ok("Ticket impreso correctamente");
-            }
-            catch (OperationCanceledException)
-            {
-                _logger?.LogWarning("Impresión de ticket cancelada por el cliente para la impresora {Printer}", printerName);
-                return StatusCode(499, "Client Closed Request");
-            }
-            catch (NotImplementedException ex)
-            {
-                _logger?.LogWarning(ex, "Funcionalidad no implementada para impresión de tickets");
-                return StatusCode(501, "No implementado");
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError(ex, "Error imprimiendo ticket JSON en {Printer}", printerName);
-                return StatusCode(500, "Error interno del servidor - impresión de ticket JSON");
-            }
-        }
-
+        
         // ----------------- Helpers privados -----------------
 
         private async Task<IActionResult> PrintPdfInternalAsync(IFormFile pdfFile, string printerName, CancellationToken ct)
         {
             try
             {
-                await using var input = pdfFile.OpenReadStream();
+                await using var input = pdfFile.OpenReadStream(); //Recuperar stream del archivo PDF obtenido
                 using var buffered = new MemoryStream(); // asegura Seek y validación de cabecera
                 await input.CopyToAsync(buffered, ct);
 
