@@ -1,8 +1,11 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using PrintSpoolJobService.Models;
 using Spire.Pdf;
 using Spire.Pdf.Print;
 using System.Drawing.Printing;
+using System.Globalization;
 using System.Net;
+using System.Text;
 
 namespace PrintSpoolJobService.Controllers
 {
@@ -261,6 +264,59 @@ namespace PrintSpoolJobService.Controllers
             }
         }
         
+        // Print POS Ticket - Thermal Printer
+        [HttpPost("print-ticket")]
+        [RequestSizeLimit(2_000_000)] // 2 MB
+        [Consumes("application/json")]
+        public async Task<IActionResult> PrintTicketAsync([FromBody] Ticket root, [FromQuery] string printerName, CancellationToken ct)
+        {
+            if (!IsPrinterNameSafe(printerName))
+                return BadRequest("Printer name contains invalid characters");
+
+            var targetPrinter = printerName?.Trim() ?? string.Empty;
+            if (!PrinterExists(targetPrinter))
+                return NotFound($"Printer '{targetPrinter}' not found");
+
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (root is null)
+                    return BadRequest("Invalid ticket JSON format");
+
+                // Model-level validation
+                var validationErrors = root.Validate().ToArray();
+                if (validationErrors.Length > 0)
+                {
+                    _logger?.LogWarning("Ticket validation failed for printer {Printer}: {Errors}", targetPrinter, string.Join("; ", validationErrors));
+                    return BadRequest(new { errors = validationErrors });
+                }
+
+                // Build printer-ready bytes from the Ticket model
+                var bytes = root.ToPrinterBytes();
+
+                ct.ThrowIfCancellationRequested();
+
+                // Send raw job to printer (uses existing helper in the project)
+                RawPrinterHelper.SendRawJob(targetPrinter, bytes, "Ticket RAW Job");
+
+                _logger?.LogInformation("Ticket job sent to printer {Printer}. Size={Size} bytes, Items={Items}",
+                    targetPrinter, bytes.Length, root.Items?.Count ?? 0);
+
+                return Ok("Ticket printed successfully");
+            }
+            catch (OperationCanceledException)
+            {
+                _logger?.LogWarning("Print ticket canceled by client for printer {Printer}", targetPrinter);
+                return StatusCode(499, "Client Closed Request");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error printing Ticket to {Printer}", targetPrinter);
+                return StatusCode(500, "Internal server error - Error print Ticket");
+            }
+        }
+
         // ----------------- Helpers privados -----------------
 
         private async Task<IActionResult> PrintPdfInternalAsync(IFormFile pdfFile, string printerName, CancellationToken ct)

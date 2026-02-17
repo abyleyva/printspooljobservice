@@ -39,10 +39,11 @@ This document tracks the execution of the upgrade for `PrintSpoolJobService` to 
 - [⊘] (3) Re-run tests after fixes
 - [⊘] (4) All tests pass with 0 failures (**Verify**)
 
-### [ ] TASK-004: Final commit
+### [▶] TASK-004: Final commit
 **References**: Plan §Source Control Strategy
 
-- [ ] (1) Commit all remaining changes with message: "TASK-004: Complete upgrade to `net10.0` for PrintSpoolJobService"
+- [▶] (1) Commit all remaining changes with message: "TASK-004: Complete upgrade to `net10.0` for PrintSpoolJobService"
+
 
 
 

@@ -22,6 +22,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include=".github\upgrades\scenarios\new-dotnet-version_69f70d\plan.md" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="POSPrinter">
       <HintPath>..\DLL-PosPrinter\bin\Release\net8.0-windows\POSPrinter.dll</HintPath>
     </Reference>
