@@ -17,12 +17,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Folder Include=".github\upgrades\scenarios\new-dotnet-version_69f70d\" />
     <Folder Include="Models\" />
     <Folder Include="Services\" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Include=".github\upgrades\scenarios\new-dotnet-version_69f70d\plan.md" />
   </ItemGroup>
 
   <ItemGroup>

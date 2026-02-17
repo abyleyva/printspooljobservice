@@ -5,7 +5,10 @@ using Spire.Pdf.Print;
 using System.Drawing.Printing;
 using System.Globalization;
 using System.Net;
+using System.Diagnostics;
 using System.Text;
+using System.Net.Http;
+using System.Text.RegularExpressions;
 
 namespace PrintSpoolJobService.Controllers
 {
@@ -23,15 +26,47 @@ namespace PrintSpoolJobService.Controllers
         {
             try
             {
-                var printers = PrinterSettings
+                // PrinterSettings.InstalledPrinters is only supported on Windows (6.1+).
+                // On non-Windows platforms try to enumerate via CUPS (`lpstat`) if available.
+                string[] printers;
+                if (!OperatingSystem.IsWindows())
+                {
+                    try
+                    {
+                        printers = GetCupsPrinters();
+                        if (printers.Length == 0)
+                        {
+                            _logger?.LogWarning("Printer enumeration not available on non-Windows platform or no printers found");
+                            return StatusCode(501, new {
+                                message = "Printer enumeration not implemented on this platform",
+                                reason = "CUPS (lpstat) not available or no printers configured",
+                                resolution = "Install CUPS (provides lpstat/lpoptions) or enable the CUPS web interface at http://localhost:631"
+                            });
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Failed to enumerate printers via CUPS on non-Windows platform");
+                        return StatusCode(501, new {
+                            message = "Printer enumeration not implemented on this platform",
+                            reason = "Error executing CUPS utilities or accessing CUPS web interface",
+                            details = ex.Message,
+                            resolution = "Ensure CUPS is installed and lpstat/lpoptions are available, or that the CUPS web UI is accessible on http://localhost:631"
+                        });
+                    }
+                }
+                else
+                {
+                    printers = PrinterSettings
                     .InstalledPrinters
                     .Cast<string>()
                     .OrderBy(p => p)
                     .ToArray();
 
-                if (printers.Length == 0)
-                {
-                    _logger?.LogWarning("No printers found");
+                    if (printers.Length == 0)
+                    {
+                        _logger?.LogWarning("No printers found");
+                    }
                 }
 
                 // 200 con lista (posiblemente vacía) es más predecible para el cliente
@@ -398,10 +433,238 @@ namespace PrintSpoolJobService.Controllers
         {
             if (string.IsNullOrWhiteSpace(printerName)) return false;
             var target = printerName.Trim();
-            return PrinterSettings
-                .InstalledPrinters
-                .Cast<string>()
-                .Any(p => string.Equals(p, target, StringComparison.OrdinalIgnoreCase));
+            if (OperatingSystem.IsWindows())
+            {
+                return PrinterSettings
+                    .InstalledPrinters
+                    .Cast<string>()
+                    .Any(p => string.Equals(p, target, StringComparison.OrdinalIgnoreCase));
+            }
+
+            try
+            {
+                var cups = GetCupsPrinters();
+                return cups.Any(p => string.Equals(p, target, StringComparison.OrdinalIgnoreCase));
+            }
+            catch
+            {
+                // If enumeration via lpstat fails, be conservative and return false.
+                return false;
+            }
+        }
+
+        private static string[] GetCupsPrinters()
+        {
+            // Try command-line tools first (lpstat / lpoptions). If those fail, fallback to HTTP scraping
+            // of the local CUPS web interface at http://localhost:631/printers/.
+
+            try
+            {
+                var result = GetCupsPrintersViaLpstat();
+                if (result.Length > 0) return result;
+            }
+            catch (Exception ex)
+            {
+                _ = ex; // swallow and fallback
+            }
+
+            try
+            {
+                var result = GetCupsPrintersViaHttp();
+                return result;
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
+        }
+
+        private static string[] GetCupsPrintersViaLpstat()
+        {
+            // Use `lpstat -p -d` first. If lpstat is missing or returns empty, try combining
+            // `lpstat -p` and `lpoptions -d` to detect default.
+            string output = null!;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "lpstat",
+                    Arguments = "-p -d",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null) return Array.Empty<string>();
+
+                var outTask = proc.StandardOutput.ReadToEndAsync();
+                var errTask = proc.StandardError.ReadToEndAsync();
+                if (!proc.WaitForExit(2000))
+                {
+                    try { proc.Kill(true); } catch { }
+                }
+
+                output = outTask.IsCompleted ? outTask.Result : outTask.GetAwaiter().GetResult();
+                var err = errTask.IsCompleted ? errTask.Result : errTask.GetAwaiter().GetResult();
+
+                if (string.IsNullOrWhiteSpace(output))
+                {
+                    // lpstat returned nothing; try lpstat -p only and lpoptions -d for default
+                    var psi2 = new ProcessStartInfo
+                    {
+                        FileName = "lpstat",
+                        Arguments = "-p",
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    using var proc2 = Process.Start(psi2);
+                    if (proc2 == null) return Array.Empty<string>();
+                    var out2 = proc2.StandardOutput.ReadToEndAsync();
+                    if (!proc2.WaitForExit(2000))
+                    {
+                        try { proc2.Kill(true); } catch { }
+                    }
+                    output = out2.IsCompleted ? out2.Result : out2.GetAwaiter().GetResult();
+
+                    // try to get default via lpoptions -d
+                    string defaultPrinter = null;
+                    try
+                    {
+                        var psi3 = new ProcessStartInfo
+                        {
+                            FileName = "lpoptions",
+                            Arguments = "-d",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        };
+                        using var proc3 = Process.Start(psi3);
+                        if (proc3 != null)
+                        {
+                            var out3 = proc3.StandardOutput.ReadToEndAsync();
+                            if (!proc3.WaitForExit(1000))
+                            {
+                                try { proc3.Kill(true); } catch { }
+                            }
+                            var txt = out3.IsCompleted ? out3.Result : out3.GetAwaiter().GetResult();
+                            if (!string.IsNullOrWhiteSpace(txt))
+                            {
+                                // lpoptions -d PRINTER
+                                defaultPrinter = txt.Trim();
+                            }
+                        }
+                    }
+                    catch { }
+
+                    return ParseLpstatOutput(output, defaultPrinter);
+                }
+
+                return ParseLpstatOutput(output, null);
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
+        }
+
+        private static string[] ParseLpstatOutput(string output, string? defaultPrinter)
+        {
+            if (string.IsNullOrWhiteSpace(output)) return Array.Empty<string>();
+            var names = new LinkedHashSet<string>();
+            using var sr = new StringReader(output);
+            string? line;
+            while ((line = sr.ReadLine()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                var trimmed = line.Trim();
+                // Detect default line: "system default destination: NAME"
+                if (trimmed.StartsWith("system default destination:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var idx = trimmed.IndexOf(':');
+                    if (idx >= 0 && idx + 1 < trimmed.Length)
+                        defaultPrinter = trimmed[(idx + 1)..].Trim();
+                    continue;
+                }
+                var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && string.Equals(parts[0], "printer", StringComparison.OrdinalIgnoreCase))
+                {
+                    var name = parts[1].Trim();
+                    if (!string.IsNullOrEmpty(name)) names.Add(name);
+                }
+            }
+
+            var ordered = new List<string>();
+            if (!string.IsNullOrEmpty(defaultPrinter) && names.Contains(defaultPrinter)) ordered.Add(defaultPrinter!);
+            foreach (var n in names.OrderBy(n => n))
+            {
+                if (string.Equals(n, defaultPrinter, StringComparison.OrdinalIgnoreCase)) continue;
+                ordered.Add(n);
+            }
+            return ordered.ToArray();
+        }
+
+        private static string[] GetCupsPrintersViaHttp()
+        {
+            // Query the local CUPS web interface and parse printer links.
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+                var html = client.GetStringAsync("http://localhost:631/printers/").GetAwaiter().GetResult();
+                if (string.IsNullOrWhiteSpace(html)) return Array.Empty<string>();
+
+                var names = new LinkedHashSet<string>();
+                string? defaultPrinter = null;
+
+                // Find default printer from common marker
+                // e.g. <dt>System default destination:</dt><dd>PRINTER</dd>
+                var mDefault = Regex.Match(html, "system default destination:\\s*</?[^>]*>([A-Za-z0-9._-]+)", RegexOptions.IgnoreCase);
+                if (mDefault.Success && mDefault.Groups.Count > 1)
+                {
+                    defaultPrinter = mDefault.Groups[1].Value.Trim();
+                }
+
+                // Find links like /printers/NAME
+                foreach (Match m in Regex.Matches(html, @"/printers/([^\""'\/\s]+)", RegexOptions.IgnoreCase))
+                {
+                    var raw = m.Groups[1].Value;
+                    var parts = raw.Split(new[] { '/', '?', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries);
+                    var name = parts.Length > 0 ? parts[0] : raw;
+                    if (!string.IsNullOrWhiteSpace(name)) names.Add(WebUtility.HtmlDecode(name));
+                }
+
+                var ordered = new List<string>();
+                if (!string.IsNullOrEmpty(defaultPrinter) && names.Contains(defaultPrinter)) ordered.Add(defaultPrinter!);
+                foreach (var n in names.OrderBy(n => n))
+                {
+                    if (string.Equals(n, defaultPrinter, StringComparison.OrdinalIgnoreCase)) continue;
+                    ordered.Add(n);
+                }
+                return ordered.ToArray();
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
+        }
+
+        // Small insertion-ordered set to preserve unique names while keeping deterministic iteration
+        private class LinkedHashSet<T> : IEnumerable<T>
+        {
+            private readonly HashSet<T> _set = new();
+            private readonly List<T> _list = new();
+            public void Add(T item)
+            {
+                if (_set.Add(item)) _list.Add(item);
+            }
+            public bool Contains(T item) => _set.Contains(item);
+            public IEnumerator<T> GetEnumerator() => _list.GetEnumerator();
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
         }
 
         private static bool IsPrinterNameSafe(string printerName)
