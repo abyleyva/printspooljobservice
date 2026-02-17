@@ -57,11 +57,11 @@ namespace PrintSpoolJobService.Controllers
                 }
                 else
                 {
+#pragma warning disable CA1416 // Validate platform compatibility
                     printers = PrinterSettings
                     .InstalledPrinters
-                    .Cast<string>()
-                    .OrderBy(p => p)
-                    .ToArray();
+                    .Cast<string>().OrderBy(p => p).ToArray();
+#pragma warning restore CA1416 // Validate platform compatibility
 
                     if (printers.Length == 0)
                     {
@@ -435,10 +435,11 @@ namespace PrintSpoolJobService.Controllers
             var target = printerName.Trim();
             if (OperatingSystem.IsWindows())
             {
+#pragma warning disable CA1416 // Validate platform compatibility
                 return PrinterSettings
                     .InstalledPrinters
-                    .Cast<string>()
-                    .Any(p => string.Equals(p, target, StringComparison.OrdinalIgnoreCase));
+                    .Cast<string>().Any(p => string.Equals(p, target, StringComparison.OrdinalIgnoreCase));
+#pragma warning restore CA1416 // Validate platform compatibility
             }
 
             try
@@ -532,7 +533,7 @@ namespace PrintSpoolJobService.Controllers
                     output = out2.IsCompleted ? out2.Result : out2.GetAwaiter().GetResult();
 
                     // try to get default via lpoptions -d
-                    string defaultPrinter = null;
+                    string? defaultPrinter = null;
                     try
                     {
                         var psi3 = new ProcessStartInfo
