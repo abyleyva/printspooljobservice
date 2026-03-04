@@ -69,7 +69,7 @@ namespace PrintSpoolJobService.Controllers
                     }
                 }
 
-                // 200 con lista (posiblemente vacía) es más predecible para el cliente
+                // 200 Printer List (maybe empty) is more predictable for the client
                 return Ok(printers);
             }
             catch (Exception ex)
@@ -84,10 +84,10 @@ namespace PrintSpoolJobService.Controllers
         {
             try
             {
-                // 1) IP local del socket HTTP (útil detrás de reverse proxy o múltiples NICs)
+                // 1) Local IP of the HTTP socket (useful behind reverse proxy or multiple NICs)
                 var httpLocal = HttpContext?.Connection?.LocalIpAddress;
 
-                // 2) Recoger direcciones de NICs operativas y no virtuales/túnel
+                // 2) Collect addresses of operational and non-virtual/tunnel NICs
                 var nics = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
                     .Where(ni =>
                         ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up &&
@@ -105,7 +105,7 @@ namespace PrintSpoolJobService.Controllers
                     return b.Length >= 2 && b[0] == 169 && b[1] == 254;
                 }
 
-                // IPv4 válidas
+                // Valid IPv4 addresses
                 var v4 = unicast
                     .Select(x => x.Address)
                     .Where(ip =>
@@ -116,7 +116,7 @@ namespace PrintSpoolJobService.Controllers
                     .Distinct()
                     .ToList();
 
-                // IPv6 válidas (evitar link-local, Teredo, multicast, unspecified)
+                // Valid IPv6 addresses (not link-local, Teredo, multicast, unspecified)
                 var v6 = unicast
                     .Select(x => x.Address)
                     .Where(ip =>
@@ -128,7 +128,7 @@ namespace PrintSpoolJobService.Controllers
                     .Distinct()
                     .ToList();
 
-                // Heurística simple para una "primaria": prioriza direcciones con puerta de enlace
+                // Simple heuristic for a "primary" address: prioritize addresses with a gateway
                 string? PrimaryOf(IEnumerable<IPAddress> addresses, System.Net.Sockets.AddressFamily af)
                 {
                     var nicWithGw = nics.FirstOrDefault(ni =>
@@ -162,7 +162,7 @@ namespace PrintSpoolJobService.Controllers
                 switch (sel)
                 {
                     case "ipv4":
-                        if (v4.Count == 0) return NotFound("No se encontraron direcciones IPv4 válidas");
+                        if (v4.Count == 0) return NotFound("No valid IPv4 addresses found");
                         response = new
                         {
                             hostname = resultAll.hostname,
@@ -173,7 +173,7 @@ namespace PrintSpoolJobService.Controllers
                         break;
 
                     case "ipv6":
-                        if (v6.Count == 0) return NotFound("No se encontraron direcciones IPv6 válidas");
+                        if (v6.Count == 0) return NotFound("No valid IPv6 addresses found");
                         response = new
                         {
                             hostname = resultAll.hostname,
@@ -185,7 +185,7 @@ namespace PrintSpoolJobService.Controllers
 
                     case "primary":
                         if (primaryV4 is null && primaryV6 is null && httpLocal is null)
-                            return NotFound("No se encontró dirección IP primaria");
+                            return NotFound("No primary IP address found");
                         response = new
                         {
                             hostname = resultAll.hostname,
@@ -196,7 +196,7 @@ namespace PrintSpoolJobService.Controllers
                         break;
 
                     case "httplocal":
-                        if (httpLocal is null) return NotFound("No se encontró IP local del socket HTTP");
+                        if (httpLocal is null) return NotFound("No local IP of the HTTP socket found");
                         response = new
                         {
                             hostname = resultAll.hostname,
@@ -207,22 +207,22 @@ namespace PrintSpoolJobService.Controllers
                     case "all":
                     default:
                         if (v4.Count == 0 && v6.Count == 0 && httpLocal is null)
-                            return NotFound("No se encontraron direcciones IP locales válidas");
+                            return NotFound("No valid local IP addresses found");
                         response = resultAll;
                         break;
                 }
 
-                _logger?.LogInformation("IPs locales detectadas. IPv4={CountV4}, IPv6={CountV6}, select={Select}", v4.Count, v6.Count, sel);
+                _logger?.LogInformation("Local IPs detected. IPv4={CountV4}, IPv6={CountV6}, select={Select}", v4.Count, v6.Count, sel);
                 return Ok(response);
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Error obteniendo direcciones IP locales");
-                return StatusCode(500, "Error interno del servidor - IP locales");
+                _logger?.LogError(ex, "Error obtaining local IP addresses");
+                return StatusCode(500, "Internal server error - local IPs");
             }
         }
 
-        // Imprimir PDFs
+        // Print PDFs Files
         [HttpPost("print-pdf")]
         [RequestSizeLimit(10_000_000)] // 10 MB
         [Consumes("multipart/form-data")]
@@ -243,7 +243,7 @@ namespace PrintSpoolJobService.Controllers
             return await PrintPdfInternalAsync(documentPDF, printerName.Trim(), ct);
         }
 
-        // Imprimir EZPL/ZPL como RAW a impresoras tipo Zebra
+        // Print EZPL/ZPL as RAW like Printers Zebra
         [HttpPost("print-label")]
         [RequestSizeLimit(2_000_000)] // 2 MB
         [Consumes("multipart/form-data")]
@@ -352,14 +352,14 @@ namespace PrintSpoolJobService.Controllers
             }
         }
 
-        // ----------------- Helpers privados -----------------
+        // ----------------- Private Helpers -----------------
 
         private async Task<IActionResult> PrintPdfInternalAsync(IFormFile pdfFile, string printerName, CancellationToken ct)
         {
             try
             {
-                await using var input = pdfFile.OpenReadStream(); //Recuperar stream del archivo PDF obtenido
-                using var buffered = new MemoryStream(); // asegura Seek y validación de cabecera
+                await using var input = pdfFile.OpenReadStream(); //Retrieve stream of the PDF file
+                using var buffered = new MemoryStream(); // ensures Seek and header validation
                 await input.CopyToAsync(buffered, ct);
 
                 if (!IsPdf(buffered))
@@ -372,14 +372,14 @@ namespace PrintSpoolJobService.Controllers
                 using var pdf = new PdfDocument();
                 pdf.LoadFromStream(buffered);
 
-                // Verificación: documento sin páginas
+                // Verification: document without pages
                 if (pdf.Pages.Count == 0)
                 {
                     _logger?.LogWarning("Rejected PDF with zero pages for printer {Printer}", printerName);
                     return BadRequest("The PDF document has no pages");
                 }
 
-                // Verificación: páginas vacías (heurística basada en texto)
+                // Verification: empty pages (text-based heuristic)
                 int blankPages = 0;
                 for (int i = 0; i < pdf.Pages.Count; i++)
                 {
@@ -425,7 +425,7 @@ namespace PrintSpoolJobService.Controllers
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Error printing PDF Document to {Printer}", printerName);
-                return StatusCode(500, "Internal server error - Error print PDF Document");
+                return StatusCode(500, "Internal server error - Error printing PDF Document");
             }
         }
         
@@ -441,7 +441,7 @@ namespace PrintSpoolJobService.Controllers
                     .Cast<string>().Any(p => string.Equals(p, target, StringComparison.OrdinalIgnoreCase));
 #pragma warning restore CA1416 // Validate platform compatibility
             }
-
+        
             try
             {
                 var cups = GetCupsPrinters();
@@ -671,18 +671,18 @@ namespace PrintSpoolJobService.Controllers
         private static bool IsPrinterNameSafe(string printerName)
         {
             if (string.IsNullOrWhiteSpace(printerName)) return false;
-            // Evitar caracteres de control
+            // Avoid control characters
             foreach (var ch in printerName)
             {
                 if (char.IsControl(ch)) return false;
             }
-            // Longitud razonable
+            // Reasonable length
             return printerName.Length <= 256;
         }
 
         private static bool IsPdf(Stream stream)
         {
-            // Espera cabecera "%PDF-"
+            // Expect header "%PDF-"
             const int headerLength = 5;
             if (!stream.CanSeek) return false;
 
@@ -707,21 +707,21 @@ namespace PrintSpoolJobService.Controllers
 
         private static bool IsPdfContentType(string? contentType)
         {
-            // Acepta PDF estricto y octet-stream (clientes que no setean bien el tipo)
+            // Accepts strict PDF and octet-stream (clients that do not set the type correctly)
             return string.Equals(contentType, "application/pdf", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(contentType, "application/octet-stream", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsLabelContentType(string? contentType)
         {
-            // ZPL/EPL suele venir como text/plain u octet-stream
+            // ZPL/EPL usually comes as text/plain or octet-stream
             return string.Equals(contentType, "text/plain", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(contentType, "application/octet-stream", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsJsonContentType(string? contentType)
         {
-            // Acepta application/json y octet-stream (por si el cliente no setea bien el tipo)
+            // Accepts application/json and octet-stream (in case the client does not set the type correctly)
             return string.Equals(contentType, "application/json", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(contentType, "application/octet-stream", StringComparison.OrdinalIgnoreCase);
         }

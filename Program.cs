@@ -2,17 +2,19 @@ using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Servicio como Windows Service (nombra el servicio para el SCM)
+// Service like Windows Service (name the service for the SCM)
 builder.Host.UseWindowsService(options =>
 { 
     options.ServiceName = "PrintSpoolJobService";
 });
 
-// Logging al Event Log (útil en servicios Windows) con SourceName
+// Logging Event Log (useful in Windows services) with SourceName
+#pragma warning disable CA1416 // Validate platform compatibility
 builder.Logging.AddEventLog(settings =>
 {
     settings.SourceName = "PrintSpoolJobService";
 });
+#pragma warning restore CA1416 // Validate platform compatibility
 
 builder.Services.AddCors(options =>
 {
@@ -24,21 +26,21 @@ builder.Services.AddCors(options =>
     });
 });
 
-// Controladores y Swagger
+// Controllers and Swagger
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Configuración de URL/puerto
+// URL/port configuration
 var configuredUrls = builder.Configuration["urls"] ?? Environment.GetEnvironmentVariable("ASPNETCORE_URLS");
 if (!string.IsNullOrWhiteSpace(configuredUrls))
 {
-    // Si se proporcionan URLs completas, úsalas tal cual (ej. launchSettings, ASPNETCORE_URLS)
+    // If full URLs are provided, use them as-is (e.g., launchSettings, ASPNETCORE_URLS)
     builder.WebHost.UseUrls(configuredUrls);
 }
 else
 {
-    // Si no hay URLs, elige puerto según precedencia (--port, env, appsettings, default)
+    // If no URLs, choose port according to precedence (--port, env, appsettings, default)
     var port = ResolvePort(builder.Configuration, args);
     builder.WebHost.ConfigureKestrel(options =>
     {
@@ -48,10 +50,10 @@ else
 
 var app = builder.Build();
 
-// Aplicar CORS policy
+// Apply CORS policy
 app.UseCors("LaravelApp");
 
-// Swagger sólo en desarrollo
+// Swagger only in development
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -65,7 +67,7 @@ app.Run();
 // -------- Helpers --------
 static int ResolvePort(IConfiguration configuration, string[] args)
 {
-    // 1) Argumento --port=#####
+    // 1) Argument --port=#####
     foreach (var arg in args)
     {
         const string prefix = "--port=";
@@ -74,7 +76,7 @@ static int ResolvePort(IConfiguration configuration, string[] args)
             return p;
     }
 
-    // 2) Variables de entorno
+    // 2) Environment variables
     if (int.TryParse(Environment.GetEnvironmentVariable("SERVICE_PORT"), out var envPort) && envPort > 0)
         return envPort;
     if (int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var envPort2) && envPort2 > 0)
@@ -85,6 +87,6 @@ static int ResolvePort(IConfiguration configuration, string[] args)
     if (int.TryParse(cfgPortStr, out var cfgPort) && cfgPort > 0)
         return cfgPort;
 
-    // 4) Por defecto
+    // 4) Default
     return 5075;
 }
