@@ -11,10 +11,12 @@ if (OperatingSystem.IsWindows())
     });
 
     // Logging Event Log (useful in Windows services) with SourceName
+#pragma warning disable CA1416 // Already guarded by OperatingSystem.IsWindows()
     builder.Logging.AddEventLog(settings =>
     {
         settings.SourceName = "PrintSpoolJobService";
     });
+#pragma warning restore CA1416
 }
 
 builder.Services.AddCors(options =>
