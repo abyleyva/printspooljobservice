@@ -3,18 +3,19 @@ using System.Net;
 var builder = WebApplication.CreateBuilder(args);
 
 // Service like Windows Service (name the service for the SCM)
-builder.Host.UseWindowsService(options =>
-{ 
-    options.ServiceName = "PrintSpoolJobService";
-});
-
-// Logging Event Log (useful in Windows services) with SourceName
-#pragma warning disable CA1416 // Validate platform compatibility
-builder.Logging.AddEventLog(settings =>
+if (OperatingSystem.IsWindows())
 {
-    settings.SourceName = "PrintSpoolJobService";
-});
-#pragma warning restore CA1416 // Validate platform compatibility
+    builder.Host.UseWindowsService(options =>
+    {
+        options.ServiceName = "PrintSpoolJobService";
+    });
+
+    // Logging Event Log (useful in Windows services) with SourceName
+    builder.Logging.AddEventLog(settings =>
+    {
+        settings.SourceName = "PrintSpoolJobService";
+    });
+}
 
 builder.Services.AddCors(options =>
 {

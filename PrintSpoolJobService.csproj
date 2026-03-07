@@ -22,11 +22,6 @@
     <Folder Include="Services\" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Reference Include="POSPrinter">
-      <HintPath>..\DLL-PosPrinter\bin\Release\net8.0-windows\POSPrinter.dll</HintPath>
-    </Reference>
-  </ItemGroup>
 
   <ProjectExtensions><VisualStudio><UserProperties appsettings_1json__JsonSchema="" /></VisualStudio></ProjectExtensions>
 
