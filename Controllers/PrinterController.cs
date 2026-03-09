@@ -7,8 +7,13 @@ using System.Globalization;
 using System.Net;
 using System.Diagnostics;
 using System.Text;
+using Microsoft.AspNetCore.Hosting;
+using System.IO;
+using System.Resources;
+using System.Collections;
 using System.Net.Http;
 using System.Text.RegularExpressions;
+using ICSharpCode.Decompiler.Util;
 
 namespace PrintSpoolJobService.Controllers
 {
@@ -17,10 +22,283 @@ namespace PrintSpoolJobService.Controllers
     public class PrinterController : ControllerBase
     {
         private readonly ILogger<PrinterController>? _logger;
-        public PrinterController(ILogger<PrinterController> logger)
+        private readonly IWebHostEnvironment _env;
+        private static readonly object _resxLock = new();
+        public PrinterController(ILogger<PrinterController> logger, IWebHostEnvironment env)
         {
             _logger = logger;
+            _env = env;
         }
+
+        [HttpGet("logo-keys")]
+        public IActionResult GetLogoKeys()
+        {
+            var resourcesDir = Path.Combine(_env.ContentRootPath ?? Directory.GetCurrentDirectory(), "Resources");
+            var resxPath = Path.Combine(resourcesDir, "Logos.resx");
+            if (!System.IO.File.Exists(resxPath)) return Ok(Array.Empty<object>());
+
+            try
+            {
+                Dictionary<string, object> existing = new(StringComparer.OrdinalIgnoreCase);
+                lock (_resxLock)
+                {
+                    var doc = System.Xml.Linq.XDocument.Load(resxPath);
+                    foreach (var data in doc.Root?.Elements("data") ?? Enumerable.Empty<System.Xml.Linq.XElement>())
+                    {
+                        var name = data.Attribute("name")?.Value;
+                        if (string.IsNullOrEmpty(name)) continue;
+                        var valueElem = data.Element("value");
+                        if (valueElem == null) continue;
+                        var text = valueElem.Value ?? string.Empty;
+                        try
+                        {
+                            var decoded = Convert.FromBase64String(text);
+                            existing[name] = decoded;
+                        }
+                        catch
+                        {
+                            existing[name] = text;
+                        }
+                    }
+                }
+
+                var keys = existing
+                    .Where(kv => !(kv.Key.EndsWith(".contentType", StringComparison.OrdinalIgnoreCase) || kv.Key.EndsWith(".filename", StringComparison.OrdinalIgnoreCase)))
+                    .Where(kv => kv.Value is byte[])
+                    .Select(kv => new
+                    {
+                        key = kv.Key,
+                        filename = existing.TryGetValue(kv.Key + ".filename", out var f) ? f as string : null,
+                        contentType = existing.TryGetValue(kv.Key + ".contentType", out var ct) ? ct as string : null
+                    })
+                    .OrderBy(x => x.key)
+                    .ToArray();
+
+                return Ok(keys);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error listing logo keys");
+                return StatusCode(500, "Internal server error - list logo keys");
+            }
+        }
+
+        [HttpGet("logo")]
+        public IActionResult GetLogo([FromQuery] string? key)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                return BadRequest("Resource key is required");
+
+            var keyPattern = new Regex("^[A-Za-z0-9._-]{1,200}$", RegexOptions.Compiled);
+            if (!keyPattern.IsMatch(key))
+                return BadRequest("Invalid resource key");
+
+            var resourcesDir = Path.Combine(_env.ContentRootPath ?? Directory.GetCurrentDirectory(), "Resources");
+            var resxPath = Path.Combine(resourcesDir, "Logos.resx");
+            if (!System.IO.File.Exists(resxPath)) return NotFound("No logos resource file found");
+
+            try
+            {
+                var doc = System.Xml.Linq.XDocument.Load(resxPath);
+                var data = doc.Root?.Elements("data").FirstOrDefault(e => string.Equals(e.Attribute("name")?.Value, key, StringComparison.OrdinalIgnoreCase));
+                if (data == null) return NotFound("Logo not found");
+
+                var valueElem = data.Element("value");
+                if (valueElem == null) return NotFound("Logo value missing");
+
+                byte[] bytes;
+                var text = valueElem.Value ?? string.Empty;
+                try
+                {
+                    bytes = Convert.FromBase64String(text);
+                }
+                catch
+                {
+                    return NotFound("Logo data is not binary");
+                }
+
+                // try to find stored contentType
+                var ctElem = doc.Root?.Elements("data").FirstOrDefault(e => string.Equals(e.Attribute("name")?.Value, key + ".contentType", StringComparison.OrdinalIgnoreCase));
+                string contentType = ctElem?.Element("value")?.Value ?? DetectContentType(bytes);
+
+                return File(bytes, contentType);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error serving logo {Key}", key);
+                return StatusCode(500, "Internal server error - serve logo");
+            }
+        }
+        [HttpPut("save_logo")]
+        [RequestSizeLimit(5_000_000)] // 5 MB
+        [Consumes("multipart/form-data")]
+        public async Task<IActionResult> SaveLogo(IFormFile? logo, [FromForm] string? resourceKey, CancellationToken ct)
+        {
+            if (logo is null || logo.Length == 0)
+                return BadRequest("Logo file cannot be null or empty");
+
+            var allowed = new[] { "image/png", "image/jpeg", "image/svg+xml", "image/webp" };
+            if (!allowed.Contains(logo.ContentType, StringComparer.OrdinalIgnoreCase))
+                return BadRequest("Content-Type must be one of: image/png, image/jpeg, image/svg+xml, image/webp");
+
+            const long maxBytes = 5_000_000; // 5 MB
+            if (logo.Length > maxBytes)
+                return BadRequest($"Logo file too large. Max allowed is {maxBytes} bytes");
+
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var original = Path.GetFileName(logo.FileName ?? string.Empty);
+                if (string.IsNullOrWhiteSpace(original))
+                    return BadRequest("Invalid file name");
+
+                // Basic filename safety
+                if (original.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || original.Contains(".."))
+                    return BadRequest("Invalid file name");
+
+                var ext = Path.GetExtension(original);
+                if (string.IsNullOrEmpty(ext))
+                {
+                    ext = logo.ContentType switch
+                    {
+                        "image/png" => ".png",
+                        "image/jpeg" => ".jpg",
+                        "image/svg+xml" => ".svg",
+                        "image/webp" => ".webp",
+                        _ => ".img"
+                    };
+                }
+
+                // resource key to store inside the .resx
+                var key = string.IsNullOrWhiteSpace(resourceKey) ? "logo" : resourceKey.Trim();
+                // Validate key with a safe pattern: allow letters, digits, dot, underscore and hyphen
+                var keyPattern = new Regex("^[A-Za-z0-9._-]{1,200}$", RegexOptions.Compiled);
+                if (!keyPattern.IsMatch(key))
+                    return BadRequest("Invalid resource key. Allowed: A-Z a-z 0-9 . _ - (max 200 chars)");
+
+                // Read uploaded content into memory
+                await using var input = logo.OpenReadStream();
+                using var ms = new MemoryStream(capacity: (int)logo.Length);
+                await input.CopyToAsync(ms, ct);
+                var bytes = ms.ToArray();
+
+                // Prepare Resources directory and .resx file path
+                var resourcesDir = Path.Combine(_env.ContentRootPath ?? Directory.GetCurrentDirectory(), "Resources");
+                Directory.CreateDirectory(resourcesDir);
+                var resxPath = Path.Combine(resourcesDir, "Logos.resx");
+
+                // Load existing resources (if any) using simple XML read to avoid dependency on ResX types
+                var existing = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                if (System.IO.File.Exists(resxPath))
+                {
+                    try
+                    {
+                        var doc = System.Xml.Linq.XDocument.Load(resxPath);
+                        foreach (var data in doc.Root?.Elements("data") ?? Enumerable.Empty<System.Xml.Linq.XElement>())
+                        {
+                            var name = data.Attribute("name")?.Value;
+                            if (string.IsNullOrEmpty(name)) continue;
+                            var valueElem = data.Element("value");
+                            if (valueElem == null) continue;
+                            var text = valueElem.Value ?? string.Empty;
+                            // try decode base64 for byte[] resources
+                            try
+                            {
+                                var decoded = Convert.FromBase64String(text);
+                                existing[name] = decoded;
+                            }
+                            catch
+                            {
+                                existing[name] = text;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Failed to read existing .resx (XML), will overwrite");
+                        existing.Clear();
+                    }
+                }
+
+                // Replace or add the resource key with the byte[] content
+                existing[key] = bytes;
+                // Also store content type and original filename as separate resources
+                existing[$"{key}.contentType"] = logo.ContentType ?? "application/octet-stream";
+                existing[$"{key}.filename"] = original;
+
+                // Write resources back to the .resx file atomically and thread-safe within process
+                var tempResx = Path.Combine(resourcesDir, $"{Guid.NewGuid():N}.resx.tmp");
+                lock (_resxLock)
+                {
+                    try
+                    {
+                        var doc = new System.Xml.Linq.XDocument(
+                            new System.Xml.Linq.XDeclaration("1.0", "utf-8", "yes"),
+                            new System.Xml.Linq.XElement("root",
+                                new System.Xml.Linq.XElement("resheader", new System.Xml.Linq.XAttribute("name", "resmimetype"),
+                                    new System.Xml.Linq.XElement("value", "text/microsoft-resx")),
+                                new System.Xml.Linq.XElement("resheader", new System.Xml.Linq.XAttribute("name", "version"),
+                                    new System.Xml.Linq.XElement("value", "2.0")),
+                                new System.Xml.Linq.XElement("resheader", new System.Xml.Linq.XAttribute("name", "reader"),
+                                    new System.Xml.Linq.XElement("value", "System.Resources.ResXResourceReader")),
+                                new System.Xml.Linq.XElement("resheader", new System.Xml.Linq.XAttribute("name", "writer"),
+                                    new System.Xml.Linq.XElement("value", "System.Resources.ResXResourceWriter"))
+                            )
+                        );
+
+                        foreach (var kv in existing.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                        {
+                            var dataElem = new System.Xml.Linq.XElement("data", new System.Xml.Linq.XAttribute("name", kv.Key));
+                            if (kv.Value is byte[] b)
+                            {
+                                dataElem.Add(new System.Xml.Linq.XElement("value", Convert.ToBase64String(b)));
+                                dataElem.Add(new System.Xml.Linq.XAttribute("type", "System.Byte[]"));
+                            }
+                            else
+                            {
+                                dataElem.Add(new System.Xml.Linq.XElement("value", kv.Value?.ToString() ?? string.Empty));
+                            }
+                            doc.Root!.Add(dataElem);
+                        }
+
+                        doc.Save(tempResx);
+
+                        if (System.IO.File.Exists(resxPath))
+                        {
+                            var backup = resxPath + ".bak";
+                            System.IO.File.Replace(tempResx, resxPath, backup);
+                            try { if (System.IO.File.Exists(backup)) System.IO.File.Delete(backup); } catch { }
+                        }
+                        else
+                        {
+                            System.IO.File.Move(tempResx, resxPath);
+                        }
+                    }
+                    finally
+                    {
+                        try { if (System.IO.File.Exists(tempResx)) System.IO.File.Delete(tempResx); } catch { }
+                    }
+                }
+
+                _logger?.LogInformation("Saved logo into .resx key={Key} Size={Size}", key, bytes.Length);
+
+                // Do not reveal server file system paths to clients
+                return Ok(new { key });
+            }
+            catch (OperationCanceledException)
+            {
+                _logger?.LogWarning("Save logo canceled by client");
+                return StatusCode(499, "Client Closed Request");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error saving logo");
+                return StatusCode(500, "Internal server error - save logo");
+            }
+        }
+
+
         [HttpGet("get-printers")]
         public IActionResult GetPrinters()
         {
@@ -724,6 +1002,25 @@ namespace PrintSpoolJobService.Controllers
             // Accepts application/json and octet-stream (in case the client does not set the type correctly)
             return string.Equals(contentType, "application/json", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(contentType, "application/octet-stream", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string DetectContentType(byte[] b)
+        {
+            if (b == null || b.Length == 0) return "application/octet-stream";
+            // PNG: 89 50 4E 47 0D 0A 1A 0A
+            if (b.Length >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "image/png";
+            // JPEG: FF D8
+            if (b.Length >= 2 && b[0] == 0xFF && b[1] == 0xD8) return "image/jpeg";
+            // WEBP: starts with "RIFF"...."WEBP"
+            if (b.Length >= 12 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P') return "image/webp";
+            // SVG: starts with '<' and contains "svg" marker
+            try
+            {
+                var s = Encoding.UTF8.GetString(b, 0, Math.Min(b.Length, 512)).ToLowerInvariant();
+                if (s.TrimStart().StartsWith("<svg") || s.Contains("<svg")) return "image/svg+xml";
+            }
+            catch { }
+            return "application/octet-stream";
         }
 
         
