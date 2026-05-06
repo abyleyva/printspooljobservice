@@ -1,19 +1,22 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using ICSharpCode.Decompiler.Util;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc;
 using PrintSpoolJobService.Models;
 using Spire.Pdf;
 using Spire.Pdf.Print;
+using System.Collections;
+using System.Diagnostics;
 using System.Drawing.Printing;
 using System.Globalization;
-using System.Net;
-using System.Diagnostics;
-using System.Text;
-using Microsoft.AspNetCore.Hosting;
 using System.IO;
-using System.Resources;
-using System.Collections;
+using System.Net;
 using System.Net.Http;
+using System.Resources;
+using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
-using ICSharpCode.Decompiler.Util;
+using static PrintSpoolJobService.Models.Ticket;
+using POSPrinter;
 
 namespace PrintSpoolJobService.Controllers
 {
@@ -24,6 +27,9 @@ namespace PrintSpoolJobService.Controllers
         private readonly ILogger<PrinterController>? _logger;
         private readonly IWebHostEnvironment _env;
         private static readonly object _resxLock = new();
+
+        
+
         public PrinterController(ILogger<PrinterController> logger, IWebHostEnvironment env)
         {
             _logger = logger;
@@ -581,55 +587,276 @@ namespace PrintSpoolJobService.Controllers
         [HttpPost("print-ticket")]
         [RequestSizeLimit(2_000_000)] // 2 MB
         [Consumes("application/json")]
-        public async Task<IActionResult> PrintTicketAsync([FromBody] Ticket root, [FromQuery] string printerName, CancellationToken ct)
+        public async Task<IActionResult> PrintTicket([FromBody] JsonElement request)
         {
-            if (!IsPrinterNameSafe(printerName))
-                return BadRequest("Printer name contains invalid characters");
-
-            var targetPrinter = printerName?.Trim() ?? string.Empty;
-            if (!PrinterExists(targetPrinter))
-                return NotFound($"Printer '{targetPrinter}' not found");
-
             try
             {
-                ct.ThrowIfCancellationRequested();
+                if (request.ValueKind == JsonValueKind.Undefined || request.ValueKind == JsonValueKind.Null)
+                    return BadRequest("Request body cannot be null or empty");
 
-                if (root is null)
-                    return BadRequest("Invalid ticket JSON format");
-
-                // Model-level validation
-                var validationErrors = root.Validate().ToArray();
-                if (validationErrors.Length > 0)
+                // Deserialize the dynamic JSON into Ticket object
+                var options = new JsonSerializerOptions
                 {
-                    _logger?.LogWarning("Ticket validation failed for printer {Printer}: {Errors}", targetPrinter, string.Join("; ", validationErrors));
-                    return BadRequest(new { errors = validationErrors });
-                }
+                    PropertyNameCaseInsensitive = true,
+                    AllowTrailingCommas = true,
+                    ReadCommentHandling = JsonCommentHandling.Skip
+                };
 
-                // Build printer-ready bytes from the Ticket model
-                var bytes = root.ToPrinterBytes();
+                var ticket = JsonSerializer.Deserialize<Ticket>(request.GetRawText(), options);
+                if (ticket?.newTicket == null)
+                    return BadRequest("Invalid ticket structure. Expected 'newTicket' property");
 
-                ct.ThrowIfCancellationRequested();
+                var config = ticket.newTicket;
 
-                // Send raw job to printer (uses existing helper in the project)
-                RawPrinterHelper.SendRawJob(targetPrinter, bytes, "Ticket RAW Job");
+                // Validate required fields
+                if (string.IsNullOrWhiteSpace(config.PrinterName))
+                    return BadRequest("PrinterName is required");
 
-                _logger?.LogInformation("Ticket job sent to printer {Printer}. Size={Size} bytes, Items={Items}",
-                    targetPrinter, bytes.Length, root.Items?.Count ?? 0);
+                if (!IsPrinterNameSafe(config.PrinterName))
+                    return BadRequest("Printer name contains invalid characters");
 
-                return Ok("Ticket printed successfully");
+                if (!PrinterExists(config.PrinterName))
+                    return NotFound($"Printer '{config.PrinterName}' not found");
+
+                if (config.Operations == null || config.Operations.Count == 0)
+                    return BadRequest("Operations list cannot be empty");
+
+                // Log incoming ticket
+                _logger?.LogInformation(
+                    "Received ticket for printer {Printer} with {Count} operations",
+                    config.PrinterName, config.Operations.Count);
+
+                // Process the ticket
+                var result = await ProcessTicketAsync(config);
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Ticket processed successfully",
+                    printerName = config.PrinterName,
+                    operationsProcessed = config.Operations.Count
+                });
+            }
+            catch (JsonException ex)
+            {
+                _logger?.LogError(ex, "Invalid JSON format in ticket request");
+                return BadRequest($"Invalid JSON format: {ex.Message}");
             }
             catch (OperationCanceledException)
             {
-                _logger?.LogWarning("Print ticket canceled by client for printer {Printer}", targetPrinter);
+                _logger?.LogWarning("Print ticket processing canceled by client");
                 return StatusCode(499, "Client Closed Request");
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Error printing Ticket to {Printer}", targetPrinter);
-                return StatusCode(500, "Internal server error - Error print Ticket");
+                _logger?.LogError(ex, "Error processing ticket");
+                return StatusCode(500, "Internal server error - processing ticket");
             }
         }
 
+        private async Task<bool> ProcessTicketAsync(Ticket.TicketConfig config)
+        {
+            var printerName = config.PrinterName.Trim();
+            Encoding encoding = Encoding.GetEncoding(config.Encoding ?? "UTF-8"); // Default encoding, can be adjusted per operation if needed
+            var bytes = new List<byte>();
+            var tkt= new POSPrinter.POSTicket();
+
+            foreach (var operation in config.Operations)
+            {
+                if (string.IsNullOrWhiteSpace(operation.Action))
+                {
+                    _logger?.LogWarning("Skipping operation with null or empty action");
+                    continue;
+                }
+
+                var action = operation.Action.Trim();
+                var args = operation.Args ?? new List<object>();
+
+                _logger?.LogDebug("Processing operation: {Action} with {ArgCount} arguments", action, args.Count);
+
+                switch (action)
+                {
+                    case "Header":
+                         foreach (var arg in args)
+                        {
+                            // Puedes procesar cada argumento según el tipo
+                            tkt.AddHeader(arg?.ToString() ?? string.Empty);
+                        }
+                        break;
+                    case "Item":
+                        if (args.Count >= 4)
+                        {
+                            var code = args[0]?.ToString() ?? string.Empty;
+                            var name = args[1]?.ToString() ?? string.Empty;
+                            var quantity = Convert.ToDecimal(args[2]?.ToString() ?? "0");
+                            var price = Convert.ToDecimal(args[3]?.ToString() ?? "0");
+                            tkt.AddItem(code, name, quantity, price);
+                        }
+                        break;
+                    case "Footer":
+                        foreach (var arg in args)
+                        {
+                            // Puedes procesar cada argumento según el tipo
+                            tkt.AddFooter(arg?.ToString() ?? string.Empty);
+                        }
+                        break;
+
+                    case "Text":
+                        foreach (var arg in args)
+                        {
+                            // Puedes procesar cada argumento según el tipo
+                            tkt.Text(arg?.ToString() ?? string.Empty);
+                        }
+                        break;
+
+                    case "AlignLeft":
+                        tkt.AlignLeft();
+                        break;
+
+                    case "AlignRight":
+                        tkt.AlignRight();
+                        break;
+
+                    case "AlignCenter":
+                        tkt.AlignCenter();
+                        break;
+
+                    case "Feed":
+                        tkt.Feed(args.Count > 0 && int.TryParse(args[0]?.ToString(), out var lines) ? lines : 1);
+                        break;
+
+                    case "ContinueLine":
+                        tkt.ContinueLine(char.Parse(args.Count > 0 ? (args[0]?.ToString()) ?? "-" : "-"));                        
+                        break;
+
+                    case "PrintQRCode":
+                        if (args.Count >= 1)
+                        {
+                            var content = args[0]?.ToString() ?? string.Empty;
+                            var size = args.Count > 1 && int.TryParse(args[1]?.ToString(), out var s) ? s : 5;
+                            var qrBytes = GenerateQRCodeCommand(content, size);
+                            bytes.AddRange(qrBytes);
+                        }
+                        break;
+
+                    case "LoadImageFromURLAndPrint":
+                        if (args.Count >= 1)
+                        {
+                            var url = args[0]?.ToString();
+                            if (!string.IsNullOrWhiteSpace(url))
+                            {
+                                try
+                                {
+                                    var imageBytes = await DownloadImageAsync(url);
+                                    if (imageBytes != null && imageBytes.Length > 0)
+                                    {
+                                        var printCmd = ConvertImageToPrinterFormat(imageBytes);
+                                        bytes.AddRange(printCmd);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger?.LogWarning(ex, "Failed to download or process image from {Url}", url);
+                                }
+                            }
+                        }
+                        break;
+
+                    case "PaperCut":
+                        if (args.Count > 0 && Boolean.TryParse(args[0]?.ToString(), out bool full))
+                        {
+                            tkt.Cut(full);
+                        }
+                        break;
+
+                    case "Beep":
+                        if (args.Count > 0 && int.TryParse(args[0]?.ToString(), out var times))
+                        {
+                            for (int i = 0; i < times; i++)
+                                bytes.AddRange(new byte[] { 0x1B, 0x42, 0x03, 0x03 }); // ESC B
+                        }
+                        break;
+
+                    case "OpenCashDrawer":
+                        bytes.AddRange(new byte[] { 0x1B, 0x70, 0x00, 0x19, 0xFA }); // ESC p (Kick drawer)
+                        break;
+
+                    case "Reset":
+                        tkt.Initialize();
+                        //bytes.AddRange(new byte[] { 0x1B, 0x40 }); // ESC @
+                        break;
+
+                    default:
+                        _logger?.LogWarning("Unknown operation: {Action}", action);
+                        break;
+                }
+            }
+
+            // Send the complete job to the printer
+            if (bytes.Count >= 0)
+            {
+                try
+                {
+                    tkt.Print(printerName);
+                    //RawPrinterHelper.SendRawJob(printerName, bytes.ToArray(), "Ticket RAW Job");
+                    _logger?.LogInformation(
+                        "Ticket job sent to printer {Printer}. Size={Size} bytes",
+                        printerName, bytes.Count);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogError(ex, "Failed to send ticket to printer {Printer}", printerName);
+                    throw;
+                }
+            }
+
+            return false;
+        }
+
+        private byte[] GenerateQRCodeCommand(string content, int size)
+        {
+            // ESC i command format for QR code
+            // This is a basic implementation - adjust based on your thermal printer model
+            var bytes = new List<byte> { 0x1B, 0x69 }; // ESC i
+            bytes.AddRange(Encoding.UTF8.GetBytes(content));
+            bytes.Add(0x00);
+            return bytes.ToArray();
+        }
+
+        private async Task<byte[]?> DownloadImageAsync(string url)
+        {
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                var response = await client.GetAsync(url);
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadAsByteArrayAsync();
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Error downloading image from {Url}", url);
+                return null;
+            }
+        }
+
+        private byte[] ConvertImageToPrinterFormat(byte[] imageBytes)
+        {
+            // This is a placeholder - you'll need to implement proper image-to-printer-format conversion
+            // For most thermal printers, this involves:
+            // 1. Loading the image
+            // 2. Converting to monochrome (1-bit)
+            // 3. Resizing to printer width (usually 384 or 576 pixels)
+            // 4. Converting to ESC/POS format
+            // For now, just return a basic structure
+            var bytes = new List<byte> { 0x1B, 0x2A };
+            bytes.AddRange(imageBytes);
+            return bytes.ToArray();
+        }
+        
         // ----------------- Private Helpers -----------------
 
         private async Task<IActionResult> PrintPdfInternalAsync(IFormFile pdfFile, string printerName, CancellationToken ct)
@@ -1022,7 +1249,53 @@ namespace PrintSpoolJobService.Controllers
             catch { }
             return "application/octet-stream";
         }
+        //public void ProcesarTicket(TicketConfig miTicket)
+        //{
+        //    Console.WriteLine($"--- Iniciando impresión en: {miTicket.PrinterName} ---");
 
-        
+        //    foreach (var op in miTicket.Operations)
+        //    {
+        //        // Usamos el nombre de la acción para decidir qué hacer
+        //        switch (op.Action)
+        //        {
+        //            case "EscribirTexto":
+        //                string texto = op.Args[0].ToString();
+        //                Console.WriteLine($"[ESCRIBIENDO]: {texto}");
+        //                break;
+
+        //            case "EstablecerAlineacion":
+        //                int alineacion = int.Parse(op.Args[0].ToString());
+        //                Console.WriteLine($"[ALINEACIÓN]: {alineacion} (0:Izq, 1:Centro, 2:Der)");
+        //                break;
+
+        //            case "ImprimirCodigoQr":
+        //                string contenidoQr = op.Args[0].ToString();
+        //                string tamano = op.Args[1].ToString();
+        //                Console.WriteLine($"[QR]: Generando para {contenidoQr} con tamaño {tamano}");
+        //                break;
+
+        //            case "CargarImagenDesdeURLEImprimir":
+        //                string url = op.Args[0].ToString();
+        //                Console.WriteLine($"[IMAGEN]: Descargando desde {url}...");
+        //                break;
+
+        //            case "Corte":
+        //                Console.WriteLine("[CORTE]: Papel cortado.");
+        //                break;
+
+        //            case "Beep":
+        //                int veces = int.Parse(op.Args[0].ToString());
+        //                Console.WriteLine($"[BEEP]: Sonando {veces} veces.");
+        //                break;
+
+        //            default:
+        //                // Para acciones que no programamos específicamente pero queremos saber que existen
+        //                Console.WriteLine($"[INFO]: Ejecutando acción '{op.Action}' con {op.Args.Count} argumentos.");
+        //                break;
+        //        }
+        //    }
+        //}
+
+
     }
 }
