@@ -18,8 +18,8 @@ namespace PrintSpoolJobService.Models
         }
         public class OperationTicket //Operations like Print,Feed, Cut, OpenCashDrawer, etc.
         {
-            public string Action { get; set; }
-            public List<object> Args { get; set; } // 'object' allows mixing int, string, and bool
+            public required string Action { get; set; }
+            public required List<object> Args { get; set; } // 'object' allows mixing int, string, and bool
         }
         
     }

@@ -1,22 +1,27 @@
 ﻿using ICSharpCode.Decompiler.Util;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
+using POSPrinter;
 using PrintSpoolJobService.Models;
 using Spire.Pdf;
 using Spire.Pdf.Print;
 using System.Collections;
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
 using System.Globalization;
 using System.IO;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Resources;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
+using static ICSharpCode.Decompiler.IL.Transforms.Stepper;
 using static PrintSpoolJobService.Models.Ticket;
-using POSPrinter;
 
 namespace PrintSpoolJobService.Controllers
 {
@@ -677,26 +682,88 @@ namespace PrintSpoolJobService.Controllers
                 switch (action)
                 {
                     case "Header":
-                         foreach (var arg in args)
+                        tkt.Bold(true);
+                        foreach (var arg in args)
                         {
                             // Puedes procesar cada argumento según el tipo
                             tkt.AddHeader(arg?.ToString() ?? string.Empty);
                         }
+                        tkt.Bold(false);
                         break;
-                    case "Item":
-                        if (args.Count >= 4)
+                    case "HeaderItem":
+                        // Espera que cada arg sea un array/lista de 3 elementos: texto, ancho, alineación
+                        var columns = args
+                            .Select(arg =>
+                            {
+                                if (arg is JsonElement elem && elem.ValueKind == JsonValueKind.Array && elem.GetArrayLength() == 3)
+                                {
+                                    var text = elem[0].GetString() ?? "";
+                                    var width = elem[1].GetInt32();
+                                    var align = (POSTicket.TextAlign)elem[2].GetInt32();
+                                    tkt.EnableWrap(true,POSTicket.WrapMode.Word);
+                                    return (text, width, align);
+                                }
+                                // fallback: columna fija si el formato no es correcto
+                                return ("", 8, POSTicket.TextAlign.Left);
+                            })
+                            .ToArray();
+                        //tkt.AddColumns(columns);
+                        tkt.AddColumnsWrapped(columns);
+                        break;
+                    case "RowItem":
+                        tkt.EnableWrap(true, POSTicket.WrapMode.Word);
+                        foreach (var arg in args)
                         {
-                            var code = args[0]?.ToString() ?? string.Empty;
-                            var name = args[1]?.ToString() ?? string.Empty;
-                            var quantity = Convert.ToDecimal(args[2]?.ToString() ?? "0");
-                            var price = Convert.ToDecimal(args[3]?.ToString() ?? "0");
-                            tkt.AddItem(code, name, quantity, price);
+                            //elem.GetArrayLength() Fijo 4 Elementos: code, name, qty, price
+                            if (arg is JsonElement elem && elem.ValueKind == JsonValueKind.Array && elem.GetArrayLength() == 4) 
+                            {
+                                var code = elem[0].GetString() ?? string.Empty;
+                                var name = elem[1].GetString() ?? string.Empty;
+                                var quantity = elem[2].ValueKind == JsonValueKind.Number ? elem[2].GetDecimal() : Convert.ToDecimal(elem[2].ToString());
+                                var price = elem[3].ValueKind == JsonValueKind.Number ? elem[3].GetDecimal() : Convert.ToDecimal(elem[3].ToString());
+                                tkt.AddItem(code, name, quantity, price);
+                            }
+                        }
+                        break;
+                    case "CustomItem":
+                        // Espera que cada arg sea un array de arrays, donde cada array interno tiene 3 elementos: texto, ancho, alineación
+                        foreach (var arg in args)
+                        {
+                            if (arg is JsonElement elem && elem.ValueKind == JsonValueKind.Array)
+                            {
+                                var CRows = new List<(string text, int width, POSTicket.TextAlign align)>();
+                                
+                                // Iterar sobre cada elemento del array (que debería ser un array de 3 elementos)
+                                for (int i = 0; i < elem.GetArrayLength(); i++)
+                                {
+                                    var rowItem = elem[i];
+                                    if (rowItem.ValueKind == JsonValueKind.Array && rowItem.GetArrayLength() == 3)
+                                    {
+                                        var text = rowItem[0].GetString() ?? "";
+                                        var width = rowItem[1].GetInt32();
+                                        var align = (POSTicket.TextAlign)rowItem[2].GetInt32();
+                                        tkt.EnableWrap(true, POSTicket.WrapMode.Word);
+                                        CRows.Add((text, width, align));
+                                    }
+                                }
+                                
+                                // Añadir la fila al ticket si tiene columnas
+                                if (CRows.Count > 0)
+                                {
+                                    tkt.AddCustomItem(CRows.ToArray());
+                                }
+                            }
+                        }
+                        break;
+                    case "Body":
+                        foreach (var arg in args)
+                        {
+                            tkt.AddBody(arg?.ToString() ?? string.Empty);
                         }
                         break;
                     case "Footer":
                         foreach (var arg in args)
                         {
-                            // Puedes procesar cada argumento según el tipo
                             tkt.AddFooter(arg?.ToString() ?? string.Empty);
                         }
                         break;
@@ -704,7 +771,6 @@ namespace PrintSpoolJobService.Controllers
                     case "Text":
                         foreach (var arg in args)
                         {
-                            // Puedes procesar cada argumento según el tipo
                             tkt.Text(arg?.ToString() ?? string.Empty);
                         }
                         break;
@@ -1249,53 +1315,5 @@ namespace PrintSpoolJobService.Controllers
             catch { }
             return "application/octet-stream";
         }
-        //public void ProcesarTicket(TicketConfig miTicket)
-        //{
-        //    Console.WriteLine($"--- Iniciando impresión en: {miTicket.PrinterName} ---");
-
-        //    foreach (var op in miTicket.Operations)
-        //    {
-        //        // Usamos el nombre de la acción para decidir qué hacer
-        //        switch (op.Action)
-        //        {
-        //            case "EscribirTexto":
-        //                string texto = op.Args[0].ToString();
-        //                Console.WriteLine($"[ESCRIBIENDO]: {texto}");
-        //                break;
-
-        //            case "EstablecerAlineacion":
-        //                int alineacion = int.Parse(op.Args[0].ToString());
-        //                Console.WriteLine($"[ALINEACIÓN]: {alineacion} (0:Izq, 1:Centro, 2:Der)");
-        //                break;
-
-        //            case "ImprimirCodigoQr":
-        //                string contenidoQr = op.Args[0].ToString();
-        //                string tamano = op.Args[1].ToString();
-        //                Console.WriteLine($"[QR]: Generando para {contenidoQr} con tamaño {tamano}");
-        //                break;
-
-        //            case "CargarImagenDesdeURLEImprimir":
-        //                string url = op.Args[0].ToString();
-        //                Console.WriteLine($"[IMAGEN]: Descargando desde {url}...");
-        //                break;
-
-        //            case "Corte":
-        //                Console.WriteLine("[CORTE]: Papel cortado.");
-        //                break;
-
-        //            case "Beep":
-        //                int veces = int.Parse(op.Args[0].ToString());
-        //                Console.WriteLine($"[BEEP]: Sonando {veces} veces.");
-        //                break;
-
-        //            default:
-        //                // Para acciones que no programamos específicamente pero queremos saber que existen
-        //                Console.WriteLine($"[INFO]: Ejecutando acción '{op.Action}' con {op.Args.Count} argumentos.");
-        //                break;
-        //        }
-        //    }
-        //}
-
-
     }
 }
