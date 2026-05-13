@@ -6,6 +6,7 @@ using PrintSpoolJobService.Models;
 using Spire.Pdf;
 using Spire.Pdf.Print;
 using System.Collections;
+using System.ComponentModel.Design;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
@@ -31,9 +32,8 @@ namespace PrintSpoolJobService.Controllers
     {
         private readonly ILogger<PrinterController>? _logger;
         private readonly IWebHostEnvironment _env;
-        private static readonly object _resxLock = new();
+        private static readonly Lock _resxLock = new();
 
-        
 
         public PrinterController(ILogger<PrinterController> logger, IWebHostEnvironment env)
         {
@@ -768,7 +768,8 @@ namespace PrintSpoolJobService.Controllers
                         }
                         break;
 
-                    case "Text":
+                    
+                     case "Text":
                         foreach (var arg in args)
                         {
                             tkt.Text(arg?.ToString() ?? string.Empty);
@@ -793,6 +794,26 @@ namespace PrintSpoolJobService.Controllers
 
                     case "ContinueLine":
                         tkt.ContinueLine(char.Parse(args.Count > 0 ? (args[0]?.ToString()) ?? "-" : "-"));                        
+                        break;
+                    
+                    case "PrintLogo":
+                        if (args.Count >= 1)
+                        {
+                            var logoKey = args[0]?.ToString();
+                            if (!string.IsNullOrWhiteSpace(logoKey))
+                            {
+                                var logoBytes = LoadLogoFromResx(logoKey);
+                                if (logoBytes != null && logoBytes.Length > 0)
+                                {
+                                    // Logo RSX - Puedes ajustar los parámetros según tu impresora
+                                    tkt.AddImage(logoBytes, maxWidthDots: 384, center: true, dither: true);
+                                }
+                                else
+                                {
+                                    _logger?.LogWarning("Logo key '{LogoKey}' not found or empty in Logos.resx", logoKey);
+                                }
+                            }
+                        }
                         break;
 
                     case "PrintQRCode":
@@ -848,6 +869,8 @@ namespace PrintSpoolJobService.Controllers
                         break;
 
                     case "Reset":
+                        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+                        tkt.SetEncoding(Encoding.GetEncoding(850), codePageEscPos: 2);
                         tkt.Initialize();
                         //bytes.AddRange(new byte[] { 0x1B, 0x40 }); // ESC @
                         break;
@@ -1202,7 +1225,7 @@ namespace PrintSpoolJobService.Controllers
                 }
 
                 // Find links like /printers/NAME
-                foreach (Match m in Regex.Matches(html, @"/printers/([^\""'\/\s]+)", RegexOptions.IgnoreCase))
+                foreach (Match m in Regex.Matches(html, @"/printers/([^""'\/\s]+)", RegexOptions.IgnoreCase))
                 {
                     var raw = m.Groups[1].Value;
                     var parts = raw.Split(new[] { '/', '?', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries);
@@ -1314,6 +1337,32 @@ namespace PrintSpoolJobService.Controllers
             }
             catch { }
             return "application/octet-stream";
+        }
+
+        private byte[]? LoadLogoFromResx(string key)
+        {
+            var resourcesDir = Path.Combine(_env.ContentRootPath ?? Directory.GetCurrentDirectory(), "Resources");
+            var resxPath = Path.Combine(resourcesDir, "Logos.resx");
+            if (!System.IO.File.Exists(resxPath)) return null;
+
+            lock (_resxLock)
+            {
+                var doc = System.Xml.Linq.XDocument.Load(resxPath);
+                var data = doc.Root?.Elements("data")
+                    .FirstOrDefault(e => string.Equals(e.Attribute("name")?.Value, key, StringComparison.OrdinalIgnoreCase));
+                if (data == null) return null;
+                var valueElem = data.Element("value");
+                if (valueElem == null) return null;
+                var text = valueElem.Value ?? string.Empty;
+                try
+                {
+                    return Convert.FromBase64String(text);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
         }
     }
 }
