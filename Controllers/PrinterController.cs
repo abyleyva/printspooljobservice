@@ -817,13 +817,7 @@ namespace PrintSpoolJobService.Controllers
                         break;
 
                     case "PrintQRCode":
-                        if (args.Count >= 1)
-                        {
-                            var content = args[0]?.ToString() ?? string.Empty;
-                            var size = args.Count > 1 && int.TryParse(args[1]?.ToString(), out var s) ? s : 5;
-                            var qrBytes = GenerateQRCodeCommand(content, size);
-                            bytes.AddRange(qrBytes);
-                        }
+                        
                         break;
 
                     case "LoadImageFromURLAndPrint":
@@ -857,22 +851,17 @@ namespace PrintSpoolJobService.Controllers
                         break;
 
                     case "Beep":
-                        if (args.Count > 0 && int.TryParse(args[0]?.ToString(), out var times))
-                        {
-                            for (int i = 0; i < times; i++)
-                                bytes.AddRange(new byte[] { 0x1B, 0x42, 0x03, 0x03 }); // ESC B
-                        }
+                        //tkt.Beep();
                         break;
 
                     case "OpenCashDrawer":
-                        bytes.AddRange(new byte[] { 0x1B, 0x70, 0x00, 0x19, 0xFA }); // ESC p (Kick drawer)
+                        //tkt.OpenCashDrawer();
                         break;
 
                     case "Reset":
                         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
                         tkt.SetEncoding(Encoding.GetEncoding(850), codePageEscPos: 2);
                         tkt.Initialize();
-                        //bytes.AddRange(new byte[] { 0x1B, 0x40 }); // ESC @
                         break;
 
                     default:
