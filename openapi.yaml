@@ -1,0 +1,472 @@
+openapi: 3.0.0
+info:
+  title: Print Spool Job Service API
+  version: 1.0.0
+  description: A comprehensive RESTful API for managing printing operations across networked printers
+  contact:
+    name: Support
+    url: https://github.com/abyleyva/printspooljobservice
+    email: support@example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:5075/api/printer
+    description: Local development server
+  - url: http://{host}:5075/api/printer
+    description: Network access
+    variables:
+      host:
+        default: localhost
+        description: Hostname or IP address
+
+tags:
+  - name: Printer Discovery
+    description: Endpoints for discovering printers and network information
+  - name: PDF Printing
+    description: Endpoints for printing PDF documents
+  - name: Label Printing
+    description: Endpoints for printing labels (ZPL/EZPL)
+  - name: Ticket/Receipt Printing
+    description: Endpoints for printing thermal receipts/tickets
+  - name: Resource Management
+    description: Endpoints for managing logos and resources
+
+paths:
+  /get-printers:
+    get:
+      tags:
+        - Printer Discovery
+      summary: Get list of available printers
+      description: Returns a list of all printers installed on the system (Windows) or configured in CUPS (Linux)
+      operationId: getPrinters
+      responses:
+        '200':
+          description: List of printer names
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                  example: Brother HL-L2350DW
+        '501':
+          description: Printer enumeration not implemented on this platform
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  reason:
+                    type: string
+                  resolution:
+                    type: string
+
+  /get-local-ipaddress:
+    get:
+      tags:
+        - Printer Discovery
+      summary: Get local IP addresses
+      description: Retrieves the local network IP addresses of the host machine
+      operationId: getLocalIPAddress
+      parameters:
+        - name: select
+          in: query
+          description: Filter results (all, ipv4, ipv6, primary, httplocal)
+          schema:
+            type: string
+            enum:
+              - all
+              - ipv4
+              - ipv6
+              - primary
+              - httplocal
+            default: all
+      responses:
+        '200':
+          description: IP address information
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/IPAddressResponseAll'
+                  - $ref: '#/components/schemas/IPAddressResponseIPv4'
+                  - $ref: '#/components/schemas/IPAddressResponseIPv6'
+                  - $ref: '#/components/schemas/IPAddressResponsePrimary'
+
+  /print-pdf:
+    post:
+      tags:
+        - PDF Printing
+      summary: Print a PDF document
+      description: Prints a PDF file to the specified printer
+      operationId: printPDF
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - documentPDF
+                - printerName
+              properties:
+                documentPDF:
+                  type: string
+                  format: binary
+                  description: PDF file (max 10 MB)
+                printerName:
+                  type: string
+                  description: Target printer name
+      responses:
+        '200':
+          description: PDF printed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: PDF document printed successfully
+        '400':
+          description: Bad request (invalid file or printer name)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        '404':
+          description: Printer not found
+        '500':
+          description: Internal server error
+
+  /print-label:
+    post:
+      tags:
+        - Label Printing
+      summary: Print a label (ZPL/EZPL)
+      description: Prints a ZPL or EZPL formatted label to a thermal printer
+      operationId: printLabel
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - documentEZPL
+                - printerName
+              properties:
+                documentEZPL:
+                  type: string
+                  format: binary
+                  description: Label file in ZPL/EZPL format (max 2 MB)
+                printerName:
+                  type: string
+                  description: Target Zebra printer name
+      responses:
+        '200':
+          description: Label printed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: EZPL document printed successfully
+        '400':
+          description: Bad request
+        '404':
+          description: Printer not found
+        '500':
+          description: Internal server error
+
+  /print-ticket:
+    post:
+      tags:
+        - Ticket/Receipt Printing
+      summary: Print a thermal ticket/receipt
+      description: Prints a formatted thermal receipt with advanced layout control
+      operationId: printTicket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketRequest'
+      responses:
+        '200':
+          description: Ticket printed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  printerName:
+                    type: string
+                  operationsProcessed:
+                    type: integer
+        '400':
+          description: Bad request or invalid ticket structure
+        '404':
+          description: Printer not found
+        '500':
+          description: Internal server error
+
+  /logo-keys:
+    get:
+      tags:
+        - Resource Management
+      summary: Get all logo keys
+      description: Retrieves a list of all stored logos/images
+      operationId: getLogoKeys
+      responses:
+        '200':
+          description: List of logo keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    key:
+                      type: string
+                    filename:
+                      type: string
+                    contentType:
+                      type: string
+
+  /logo:
+    get:
+      tags:
+        - Resource Management
+      summary: Get a logo by key
+      description: Downloads a previously stored logo
+      operationId: getLogo
+      parameters:
+        - name: key
+          in: query
+          required: true
+          description: Logo resource key
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Logo data
+          content:
+            image/*: {}
+        '400':
+          description: Missing or invalid key
+        '404':
+          description: Logo not found
+        '500':
+          description: Internal server error
+
+  /save_logo:
+    put:
+      tags:
+        - Resource Management
+      summary: Upload and store a logo
+      description: Uploads and stores a logo/image file in the resource repository
+      operationId: saveLogo
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - logo
+              properties:
+                logo:
+                  type: string
+                  format: binary
+                  description: Image file (PNG, JPEG, SVG, WebP; max 5 MB)
+                resourceKey:
+                  type: string
+                  description: Custom resource key (optional, auto-generated if omitted)
+      responses:
+        '200':
+          description: Logo saved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    type: string
+        '400':
+          description: Invalid file or parameters
+        '500':
+          description: Internal server error
+
+components:
+  schemas:
+    IPAddressResponseAll:
+      type: object
+      properties:
+        hostname:
+          type: string
+        httpLocal:
+          type: string
+        ipv4:
+          type: array
+          items:
+            type: string
+        ipv6:
+          type: array
+          items:
+            type: string
+        primaryV4:
+          type: string
+        primaryV6:
+          type: string
+
+    IPAddressResponseIPv4:
+      type: object
+      properties:
+        hostname:
+          type: string
+        httpLocal:
+          type: string
+        ipv4:
+          type: array
+          items:
+            type: string
+        primaryV4:
+          type: string
+
+    IPAddressResponseIPv6:
+      type: object
+      properties:
+        hostname:
+          type: string
+        httpLocal:
+          type: string
+        ipv6:
+          type: array
+          items:
+            type: string
+        primaryV6:
+          type: string
+
+    IPAddressResponsePrimary:
+      type: object
+      properties:
+        hostname:
+          type: string
+        httpLocal:
+          type: string
+        primaryV4:
+          type: string
+        primaryV6:
+          type: string
+
+    TicketRequest:
+      type: object
+      required:
+        - newTicket
+      properties:
+        newTicket:
+          type: object
+          required:
+            - printerName
+            - operations
+          properties:
+            printerName:
+              type: string
+              description: Target printer name
+            encoding:
+              type: string
+              default: UTF-8
+              description: Character encoding
+            operations:
+              type: array
+              items:
+                $ref: '#/components/schemas/Operation'
+
+    Operation:
+      type: object
+      required:
+        - action
+        - args
+      properties:
+        action:
+          type: string
+          enum:
+            - Reset
+            - Header
+            - Footer
+            - Body
+            - Text
+            - HeaderItem
+            - RowItem
+            - CustomItem
+            - PrintLogo
+            - AlignLeft
+            - AlignCenter
+            - AlignRight
+            - Feed
+            - ContinueLine
+            - PaperCut
+            - Beep
+            - OpenCashDrawer
+          description: Operation type
+        args:
+          type: array
+          items: {}
+          description: Operation arguments (type varies by operation)
+
+    Error:
+      type: object
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    InternalServerError:
+      description: Internal Server Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+security: []
+
+x-api-status: production
+x-api-version: 1.0.0
+x-api-lifecycle: stable
